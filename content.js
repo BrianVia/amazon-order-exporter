@@ -7,7 +7,309 @@
   if (window.amazonOrderExporterLoaded) return;
   window.amazonOrderExporterLoaded = true;
 
-  // Create and inject the export button
+  // Global flag for cancellation
+  let exportCancelled = false;
+
+  // ============================================
+  // PAGINATION DETECTION
+  // ============================================
+
+  function detectCurrentFilter() {
+    const url = new URL(window.location.href);
+    return url.searchParams.get('timeFilter') || url.searchParams.get('orderFilter') || 'year-2025';
+  }
+
+  function detectTotalOrders() {
+    // Primary: ".num-orders" shows "X orders placed in YYYY"
+    const numOrdersEl = document.querySelector('.num-orders');
+    if (numOrdersEl) {
+      const match = numOrdersEl.textContent.match(/(\d+)\s*orders?/i);
+      if (match) return parseInt(match[1], 10);
+    }
+
+    // Fallback: look in page header text
+    const headerText = document.querySelector('.a-spacing-top-medium, .your-orders-content-container');
+    if (headerText) {
+      const match = headerText.textContent.match(/(\d+)\s*orders?/i);
+      if (match) return parseInt(match[1], 10);
+    }
+
+    return null;
+  }
+
+  function buildPageUrl(startIndex, filter) {
+    const url = new URL(window.location.origin + '/your-orders/orders');
+    url.searchParams.set('timeFilter', filter);
+    url.searchParams.set('startIndex', startIndex.toString());
+    return url.toString();
+  }
+
+  // ============================================
+  // RATE-LIMITED REQUEST QUEUE
+  // ============================================
+
+  class RequestQueue {
+    constructor(concurrency = 2, delayMs = 800) {
+      this.concurrency = concurrency;
+      this.delayMs = delayMs;
+      this.running = 0;
+      this.queue = [];
+    }
+
+    async add(fn) {
+      return new Promise((resolve, reject) => {
+        this.queue.push({ fn, resolve, reject });
+        this.processNext();
+      });
+    }
+
+    async processNext() {
+      if (this.running >= this.concurrency || this.queue.length === 0) return;
+
+      this.running++;
+      const { fn, resolve, reject } = this.queue.shift();
+
+      try {
+        await new Promise(r => setTimeout(r, this.delayMs));
+        const result = await fn();
+        resolve(result);
+      } catch (err) {
+        reject(err);
+      } finally {
+        this.running--;
+        this.processNext();
+      }
+    }
+  }
+
+  // ============================================
+  // FETCH AND PARSE FUNCTIONS
+  // ============================================
+
+  async function fetchPageWithRetry(url, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(url, { credentials: 'include' });
+
+        if (response.status === 429 || response.status === 503) {
+          // Rate limited - exponential backoff
+          const delay = Math.pow(2, attempt) * 1000;
+          console.log(`AOE: Rate limited, waiting ${delay}ms before retry`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          throw new Error('Authentication required. Please refresh the page and try again.');
+        }
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        return await response.text();
+      } catch (err) {
+        if (attempt === maxRetries) throw err;
+        console.warn(`AOE: Fetch attempt ${attempt} failed, retrying...`, err);
+      }
+    }
+  }
+
+  function parseOrdersFromHTML(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    const orders = [];
+    const seenOrderIds = new Set();
+
+    const orderCards = doc.querySelectorAll('.order-card, [data-testid="order-card"], .a-box-group.order, .order');
+
+    orderCards.forEach(card => {
+      const orderData = extractOrderInfo(card);
+      if (orderData.orderId && !seenOrderIds.has(orderData.orderId) && orderData.items.length > 0) {
+        seenOrderIds.add(orderData.orderId);
+        orders.push(orderData);
+      }
+    });
+
+    return orders;
+  }
+
+  // ============================================
+  // PROGRESS UI
+  // ============================================
+
+  function showProgressUI() {
+    hideProgressUI(); // Remove any existing
+
+    const overlay = document.createElement('div');
+    overlay.id = 'aoe-progress-overlay';
+    overlay.innerHTML = `
+      <div class="aoe-progress-modal">
+        <h3>Exporting Orders</h3>
+        <div class="aoe-progress-bar-container">
+          <div class="aoe-progress-bar" id="aoe-progress-bar"></div>
+        </div>
+        <p class="aoe-progress-text" id="aoe-progress-text">Initializing...</p>
+        <p class="aoe-progress-stats" id="aoe-progress-stats"></p>
+        <button class="aoe-cancel-btn" id="aoe-cancel-btn">Cancel</button>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    document.getElementById('aoe-cancel-btn').addEventListener('click', () => {
+      exportCancelled = true;
+      hideProgressUI();
+    });
+  }
+
+  function updateProgress({ current, total, message, ordersCollected }) {
+    const progressBar = document.getElementById('aoe-progress-bar');
+    const progressText = document.getElementById('aoe-progress-text');
+    const progressStats = document.getElementById('aoe-progress-stats');
+
+    if (progressText && message) {
+      progressText.textContent = message;
+    }
+
+    if (progressBar && current && total) {
+      const percent = Math.round((current / total) * 100);
+      progressBar.style.width = `${percent}%`;
+    }
+
+    if (progressStats && ordersCollected !== undefined) {
+      progressStats.textContent = `${ordersCollected} orders collected`;
+    }
+  }
+
+  function hideProgressUI() {
+    const existing = document.getElementById('aoe-progress-overlay');
+    if (existing) {
+      existing.remove();
+    }
+  }
+
+  // ============================================
+  // MULTI-PAGE FETCH ORCHESTRATOR
+  // ============================================
+
+  async function fetchAllPages(onProgress) {
+    const filter = detectCurrentFilter();
+    const totalOrders = detectTotalOrders();
+    const ordersPerPage = 10;
+    const totalPages = totalOrders ? Math.ceil(totalOrders / ordersPerPage) : 1;
+
+    onProgress({
+      message: `Found ${totalOrders || 'unknown'} orders across ${totalPages} page(s)`,
+      ordersCollected: 0
+    });
+
+    // Parse current page first
+    const allOrders = parseOrdersFromPage();
+    const seenOrderIds = new Set(allOrders.map(o => o.orderId));
+
+    onProgress({
+      current: 1,
+      total: totalPages,
+      message: `Parsed current page (${allOrders.length} orders)`,
+      ordersCollected: allOrders.length
+    });
+
+    // If only one page or couldn't detect total, return current page results
+    if (totalPages <= 1 || !totalOrders) {
+      return allOrders;
+    }
+
+    // Create request queue with rate limiting
+    const queue = new RequestQueue(2, 800);
+
+    // Determine current page's startIndex
+    const currentStartIndex = parseInt(
+      new URL(window.location.href).searchParams.get('startIndex') || '0'
+    );
+
+    // Fetch remaining pages
+    const pagePromises = [];
+    let pagesProcessed = 1; // We already have current page
+
+    for (let startIndex = 0; startIndex < totalOrders; startIndex += ordersPerPage) {
+      // Skip current page (already parsed)
+      if (startIndex === currentStartIndex) continue;
+
+      const url = buildPageUrl(startIndex, filter);
+      const pageNum = Math.floor(startIndex / ordersPerPage) + 1;
+
+      pagePromises.push(
+        queue.add(async () => {
+          if (exportCancelled) {
+            throw new Error('Export cancelled');
+          }
+
+          onProgress({
+            current: pagesProcessed + 1,
+            total: totalPages,
+            message: `Fetching page ${pageNum} of ${totalPages}...`,
+            ordersCollected: allOrders.length
+          });
+
+          try {
+            const html = await fetchPageWithRetry(url);
+            const orders = parseOrdersFromHTML(html);
+            pagesProcessed++;
+            return { success: true, orders, pageNum };
+          } catch (err) {
+            console.error(`AOE: Failed to fetch page ${pageNum}:`, err);
+            pagesProcessed++;
+            return { success: false, error: err, pageNum, orders: [] };
+          }
+        })
+      );
+    }
+
+    // Wait for all pages to complete
+    const results = await Promise.all(pagePromises);
+
+    // Merge results, deduplicating by order ID
+    let successCount = 1; // Current page
+    let failCount = 0;
+
+    results.forEach(result => {
+      if (result.success) {
+        successCount++;
+        result.orders.forEach(order => {
+          if (!seenOrderIds.has(order.orderId)) {
+            seenOrderIds.add(order.orderId);
+            allOrders.push(order);
+          }
+        });
+      } else {
+        failCount++;
+      }
+    });
+
+    onProgress({
+      current: totalPages,
+      total: totalPages,
+      message: `Completed: ${successCount} pages fetched${failCount > 0 ? `, ${failCount} failed` : ''}`,
+      ordersCollected: allOrders.length
+    });
+
+    // Sort by date (newest first) - parse the date for sorting
+    allOrders.sort((a, b) => {
+      const dateA = new Date(a.orderDate);
+      const dateB = new Date(b.orderDate);
+      if (isNaN(dateA.getTime()) || isNaN(dateB.getTime())) return 0;
+      return dateB - dateA;
+    });
+
+    return allOrders;
+  }
+
+  // ============================================
+  // BUTTON INJECTION
+  // ============================================
+
   function injectExportButton() {
     const existingBtn = document.getElementById('aoe-export-btn');
     if (existingBtn) return;
@@ -42,26 +344,26 @@
     document.getElementById('aoe-export-btn').addEventListener('click', exportOrders);
   }
 
-  // Scroll through the page to load all lazy-loaded orders
+  // ============================================
+  // SCROLL TO LOAD LAZY CONTENT
+  // ============================================
+
   async function scrollToLoadAllOrders(updateStatus) {
     return new Promise((resolve) => {
       let lastHeight = 0;
       let sameHeightCount = 0;
       let scrollAttempts = 0;
-      const maxAttempts = 100; // Safety limit
+      const maxAttempts = 50; // Reduced since we're fetching other pages anyway
 
       const scrollInterval = setInterval(() => {
         const currentHeight = document.documentElement.scrollHeight;
 
-        // Scroll to bottom
         window.scrollTo(0, currentHeight);
         scrollAttempts++;
 
-        // Count how many order cards we have
         const orderCount = document.querySelectorAll('.order-card, [data-testid="order-card"], .a-box-group.order').length;
-        updateStatus(`Loading orders... (${orderCount} found)`);
+        updateStatus(`Loading visible orders... (${orderCount} found)`);
 
-        // Check if we've stopped loading new content
         if (currentHeight === lastHeight) {
           sameHeightCount++;
         } else {
@@ -70,29 +372,27 @@
 
         lastHeight = currentHeight;
 
-        // Stop if page height hasn't changed for 3 checks or we hit max attempts
         if (sameHeightCount >= 3 || scrollAttempts >= maxAttempts) {
           clearInterval(scrollInterval);
-          // Scroll back to top
           window.scrollTo(0, 0);
-          // Wait a moment for any final renders
-          setTimeout(resolve, 500);
+          setTimeout(resolve, 300);
         }
-      }, 800);
+      }, 500);
     });
   }
 
-  // Parse orders from the current page
+  // ============================================
+  // ORDER PARSING
+  // ============================================
+
   function parseOrdersFromPage() {
     const orders = [];
     const seenOrderIds = new Set();
 
-    // Find all order cards - be more specific with selectors
     const orderCards = document.querySelectorAll('.order-card, [data-testid="order-card"], .a-box-group.order, .order');
 
     orderCards.forEach(card => {
       const orderData = extractOrderInfo(card);
-      // Dedupe by order ID
       if (orderData.orderId && !seenOrderIds.has(orderData.orderId) && orderData.items.length > 0) {
         seenOrderIds.add(orderData.orderId);
         orders.push(orderData);
@@ -102,21 +402,16 @@
     return orders;
   }
 
-  // Extract order information from a single order card
   function extractOrderInfo(card) {
     if (!card) return { items: [], orderId: '', orderDate: '', orderTotal: '' };
 
-    // Order date - look for specific patterns
+    // Order date
     let orderDate = '';
-
-    // Try multiple approaches for date
     const orderInfoSection = card.querySelector('.order-info, .yohtmlc-order-info');
     if (orderInfoSection) {
-      // Look for "Order placed" or date pattern
       const spans = orderInfoSection.querySelectorAll('.a-color-secondary, .value');
       for (const span of spans) {
         const text = span.textContent.trim();
-        // Match date patterns like "January 15, 2025" or "Jan 15, 2025"
         if (/^(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}$/i.test(text)) {
           orderDate = text;
           break;
@@ -124,7 +419,6 @@
       }
     }
 
-    // Fallback: search more broadly
     if (!orderDate) {
       const allText = card.textContent;
       const dateMatch = allText.match(/(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}/i);
@@ -133,14 +427,13 @@
       }
     }
 
-    // Order ID - look for the specific pattern
+    // Order ID
     let orderId = '';
     const orderIdEl = card.querySelector('.yohtmlc-order-id .value, [data-testid="order-id"] .value, bdi');
     if (orderIdEl) {
       orderId = orderIdEl.textContent.trim();
     }
 
-    // Fallback: try finding it in text or links
     if (!orderId) {
       const orderLink = card.querySelector('a[href*="order-details"], a[href*="orderID="]');
       if (orderLink) {
@@ -149,7 +442,6 @@
       }
     }
 
-    // Another fallback: look for order ID pattern in text
     if (!orderId) {
       const idMatch = card.textContent.match(/\b(\d{3}-\d{7}-\d{7})\b/);
       if (idMatch) {
@@ -164,7 +456,6 @@
       orderTotal = totalEl.textContent.trim();
     }
 
-    // Fallback for total
     if (!orderTotal) {
       const totalMatch = card.textContent.match(/(?:Order Total|Total)[:\s]*(\$[\d,]+\.\d{2})/i);
       if (totalMatch) {
@@ -172,17 +463,15 @@
       }
     }
 
-    // Items in this order - use more specific selectors and dedupe
+    // Items
     const items = [];
     const seenProducts = new Set();
 
-    // Primary item selectors
     const itemContainers = card.querySelectorAll('.yohtmlc-item, [data-testid="item-box"], .a-fixed-left-grid.item-box');
 
     itemContainers.forEach(container => {
       const item = extractItemInfo(container, orderDate, orderId, orderTotal);
       if (item && item.productName) {
-        // Dedupe by product name + ASIN combo
         const key = `${item.productName}|${item.asin}`;
         if (!seenProducts.has(key)) {
           seenProducts.add(key);
@@ -191,7 +480,6 @@
       }
     });
 
-    // Fallback: If no items found, look for product links directly
     if (items.length === 0) {
       const productLinks = card.querySelectorAll('.yohtmlc-product-title, a.a-link-normal[title]');
       productLinks.forEach(link => {
@@ -201,7 +489,6 @@
           if (!seenProducts.has(key)) {
             seenProducts.add(key);
 
-            // Try to get ASIN from link
             let asin = '';
             const href = link.href || '';
             const asinMatch = href.match(/\/dp\/([A-Z0-9]{10})|\/gp\/product\/([A-Z0-9]{10})/i);
@@ -226,16 +513,13 @@
     return { orderDate, orderId, orderTotal, items };
   }
 
-  // Extract individual item info
   function extractItemInfo(container, orderDate, orderId, orderTotal) {
-    // Product name - prioritize title attribute, then text
     const nameEl = container.querySelector('.yohtmlc-product-title, a[href*="/dp/"][title], a[href*="/gp/product/"][title]');
     let productName = '';
     if (nameEl) {
       productName = nameEl.title || nameEl.textContent.trim();
     }
 
-    // Fallback: look for any product link
     if (!productName) {
       const anyProductLink = container.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]');
       if (anyProductLink) {
@@ -243,27 +527,21 @@
       }
     }
 
-    // Skip if no product name or it's too short
     if (!productName || productName.length < 5) return null;
-
-    // Skip if this looks like a button or action link
     if (/^(Buy|View|Return|Write|Track|Archive|Problem)/i.test(productName)) return null;
 
-    // Quantity
     let quantity = '1';
     const qtyMatch = container.textContent.match(/Qty:\s*(\d+)/i);
     if (qtyMatch) {
       quantity = qtyMatch[1];
     }
 
-    // Price
     let price = '';
     const priceEl = container.querySelector('.a-color-price, .yohtmlc-item-price, .a-price .a-offscreen');
     if (priceEl) {
       price = priceEl.textContent.trim();
     }
 
-    // ASIN
     let asin = '';
     const asinLink = container.querySelector('a[href*="/dp/"], a[href*="/gp/product/"]');
     if (asinLink) {
@@ -284,13 +562,15 @@
     };
   }
 
-  // Clean text - remove extra whitespace and newlines
   function cleanText(text) {
     if (!text) return '';
     return text.replace(/\s+/g, ' ').trim();
   }
 
-  // Convert orders to CSV
+  // ============================================
+  // CSV GENERATION
+  // ============================================
+
   function ordersToCSV(orders) {
     const headers = ['Order Date', 'Order ID', 'Product Name', 'Quantity', 'Item Price', 'ASIN', 'Order Total'];
     const rows = [headers.join(',')];
@@ -313,7 +593,6 @@
     return rows.join('\n');
   }
 
-  // Escape CSV values
   function escapeCSV(value) {
     if (!value) return '';
     const str = String(value);
@@ -323,7 +602,6 @@
     return str;
   }
 
-  // Download CSV file
   function downloadCSV(csv, filename) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
@@ -336,7 +614,6 @@
     URL.revokeObjectURL(link.href);
   }
 
-  // Set status message
   function setStatus(message, isError = false, persist = false) {
     const statusEl = document.getElementById('aoe-status');
     if (statusEl) {
@@ -348,53 +625,76 @@
     }
   }
 
-  // Main export function
+  // ============================================
+  // MAIN EXPORT FUNCTION
+  // ============================================
+
   async function exportOrders() {
     const btn = document.getElementById('aoe-export-btn');
     const originalText = btn.innerHTML;
-    btn.innerHTML = '<span class="aoe-spinner"></span> Loading all orders...';
     btn.disabled = true;
 
+    exportCancelled = false;
+    showProgressUI();
+
     try {
-      // First, scroll through the page to load all lazy-loaded orders
-      await scrollToLoadAllOrders((msg) => {
-        const statusEl = document.getElementById('aoe-status');
-        if (statusEl) {
-          statusEl.textContent = msg;
-          statusEl.className = 'aoe-status-success';
-        }
-      });
+      // First scroll to load lazy content on current page
+      updateProgress({ message: 'Loading orders on current page...' });
+      await scrollToLoadAllOrders((msg) => updateProgress({ message: msg }));
 
-      btn.innerHTML = '<span class="aoe-spinner"></span> Parsing orders...';
+      if (exportCancelled) {
+        throw new Error('Export cancelled');
+      }
 
-      // Small delay to let the DOM settle
-      await new Promise(r => setTimeout(r, 300));
+      // Fetch all pages
+      const orders = await fetchAllPages(updateProgress);
 
-      const orders = parseOrdersFromPage();
+      if (exportCancelled) {
+        throw new Error('Export cancelled');
+      }
 
       if (orders.length === 0) {
-        setStatus('No orders found on this page. Make sure you\'re on the Orders page.', true);
+        updateProgress({ message: 'No orders found. Make sure you\'re on the Orders page.' });
+        setTimeout(hideProgressUI, 2000);
         return;
       }
 
+      // Generate and download CSV
       const totalItems = orders.reduce((sum, o) => sum + o.items.length, 0);
       const csv = ordersToCSV(orders);
       const date = new Date().toISOString().split('T')[0];
       const filename = `amazon-orders-${date}.csv`;
 
       downloadCSV(csv, filename);
+
+      updateProgress({
+        current: 100,
+        total: 100,
+        message: `Success! Exported ${totalItems} items from ${orders.length} orders`,
+        ordersCollected: orders.length
+      });
+
       setStatus(`Exported ${totalItems} items from ${orders.length} orders`);
+
+      setTimeout(hideProgressUI, 2000);
 
     } catch (error) {
       console.error('AOE Export Error:', error);
-      setStatus('Export failed: ' + error.message, true);
+      if (error.message !== 'Export cancelled') {
+        updateProgress({ message: `Export failed: ${error.message}` });
+        setStatus('Export failed: ' + error.message, true);
+        setTimeout(hideProgressUI, 3000);
+      }
     } finally {
       btn.innerHTML = originalText;
       btn.disabled = false;
     }
   }
 
-  // Initialize
+  // ============================================
+  // INITIALIZATION
+  // ============================================
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectExportButton);
   } else {

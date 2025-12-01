@@ -71,3 +71,72 @@
 @keyframes aoe-spin {
   to { transform: rotate(360deg); }
 }
+
+/* Progress Overlay */
+#aoe-progress-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.aoe-progress-modal {
+  background: white;
+  padding: 24px 32px;
+  border-radius: 8px;
+  min-width: 320px;
+  max-width: 400px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.aoe-progress-modal h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #232f3e;
+}
+
+.aoe-progress-bar-container {
+  height: 8px;
+  background: #e7e7e7;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 16px 0;
+}
+
+.aoe-progress-bar {
+  height: 100%;
+  background: linear-gradient(to right, #f0c14b, #f7dfa5);
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+.aoe-progress-text {
+  font-size: 14px;
+  color: #555;
+  margin: 0 0 16px 0;
+  min-height: 20px;
+}
+
+.aoe-progress-stats {
+  font-size: 12px;
+  color: #888;
+  margin: 0 0 16px 0;
+}
+
+.aoe-cancel-btn {
+  padding: 8px 16px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.aoe-cancel-btn:hover {
+  background: #f7f7f7;
+}
