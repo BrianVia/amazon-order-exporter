@@ -14,11 +14,6 @@
   // PAGINATION DETECTION
   // ============================================
 
-  function detectCurrentFilter() {
-    const url = new URL(window.location.href);
-    return url.searchParams.get('timeFilter') || url.searchParams.get('orderFilter') || 'year-2025';
-  }
-
   function detectTotalOrders() {
     // Primary: ".num-orders" shows "X orders placed in YYYY"
     const numOrdersEl = document.querySelector('.num-orders');
@@ -37,10 +32,12 @@
     return null;
   }
 
-  function buildPageUrl(startIndex, filter) {
-    const url = new URL(window.location.origin + '/your-orders/orders');
-    url.searchParams.set('timeFilter', filter);
+  function buildPageUrl(startIndex) {
+    // Clone the current URL and just change startIndex
+    // This preserves all other parameters (timeFilter, ref, etc.)
+    const url = new URL(window.location.href);
     url.searchParams.set('startIndex', startIndex.toString());
+    console.log(`AOE: Built URL for startIndex=${startIndex}: ${url.toString()}`);
     return url.toString();
   }
 
@@ -115,14 +112,24 @@
     }
   }
 
-  function parseOrdersFromHTML(html) {
+  function parseOrdersFromHTML(html, pageNum) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
+
+    // Debug: Check if we got a login page or error page
+    const title = doc.querySelector('title')?.textContent || '';
+    console.log(`AOE: Page ${pageNum} title: "${title}"`);
+
+    if (title.includes('Sign-In') || title.includes('Sign in')) {
+      console.warn('AOE: Got login page instead of orders');
+      return [];
+    }
 
     const orders = [];
     const seenOrderIds = new Set();
 
     const orderCards = doc.querySelectorAll('.order-card, [data-testid="order-card"], .a-box-group.order, .order');
+    console.log(`AOE: Page ${pageNum} found ${orderCards.length} order cards`);
 
     orderCards.forEach(card => {
       const orderData = extractOrderInfo(card);
@@ -132,6 +139,7 @@
       }
     });
 
+    console.log(`AOE: Page ${pageNum} parsed ${orders.length} orders`);
     return orders;
   }
 
@@ -195,10 +203,12 @@
   // ============================================
 
   async function fetchAllPages(onProgress) {
-    const filter = detectCurrentFilter();
     const totalOrders = detectTotalOrders();
     const ordersPerPage = 10;
     const totalPages = totalOrders ? Math.ceil(totalOrders / ordersPerPage) : 1;
+
+    console.log(`AOE: Detected ${totalOrders} total orders, ${totalPages} pages`);
+    console.log(`AOE: Current URL: ${window.location.href}`);
 
     onProgress({
       message: `Found ${totalOrders || 'unknown'} orders across ${totalPages} page(s)`,
@@ -237,7 +247,7 @@
       // Skip current page (already parsed)
       if (startIndex === currentStartIndex) continue;
 
-      const url = buildPageUrl(startIndex, filter);
+      const url = buildPageUrl(startIndex);
       const pageNum = Math.floor(startIndex / ordersPerPage) + 1;
 
       pagePromises.push(
@@ -254,8 +264,10 @@
           });
 
           try {
+            console.log(`AOE: Fetching URL: ${url}`);
             const html = await fetchPageWithRetry(url);
-            const orders = parseOrdersFromHTML(html);
+            console.log(`AOE: Got ${html.length} bytes for page ${pageNum}`);
+            const orders = parseOrdersFromHTML(html, pageNum);
             pagesProcessed++;
             return { success: true, orders, pageNum };
           } catch (err) {
