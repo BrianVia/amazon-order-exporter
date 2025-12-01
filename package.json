@@ -1,0 +1,19 @@
+{
+  "name": "amazon-order-exporter",
+  "version": "1.0.0",
+  "description": "Chrome extension to export Amazon order history to CSV",
+  "private": true,
+  "scripts": {
+    "build": "echo 'No build step required - load unpacked extension from this directory'",
+    "zip": "zip -r amazon-order-exporter.zip manifest.json popup.html popup.js content.js content.css icons/"
+  },
+  "keywords": [
+    "chrome-extension",
+    "amazon",
+    "orders",
+    "export",
+    "csv"
+  ],
+  "author": "",
+  "license": "MIT"
+}

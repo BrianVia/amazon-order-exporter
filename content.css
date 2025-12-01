@@ -1,0 +1,73 @@
+/* Amazon Order Exporter - Styles */
+
+#aoe-btn-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px 0;
+}
+
+.aoe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(to bottom, #f7dfa5, #f0c14b);
+  border: 1px solid #a88734;
+  border-radius: 4px;
+  color: #111;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 0 rgba(255,255,255,.4) inset;
+}
+
+.aoe-btn:hover {
+  background: linear-gradient(to bottom, #f5d78e, #eeb933);
+}
+
+.aoe-btn:active {
+  background: linear-gradient(to bottom, #eeb933, #f5d78e);
+  box-shadow: 0 1px 3px rgba(0,0,0,.2) inset;
+}
+
+.aoe-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.aoe-btn svg {
+  flex-shrink: 0;
+}
+
+#aoe-status {
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.aoe-status-success {
+  color: #067D62;
+  background: #D5F5E3;
+}
+
+.aoe-status-error {
+  color: #B12704;
+  background: #FFE0E0;
+}
+
+.aoe-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #a88734;
+  border-radius: 50%;
+  border-top-color: transparent;
+  animation: aoe-spin 0.8s linear infinite;
+}
+
+@keyframes aoe-spin {
+  to { transform: rotate(360deg); }
+}
