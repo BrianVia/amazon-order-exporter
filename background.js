@@ -5,18 +5,20 @@
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'START_EXPORT':
-      handleStartExport(sender.tab?.id);
-      sendResponse({ success: true });
-      break;
+      handleStartExport(sender.tab?.id, message.yearUrls).then(() => sendResponse({ success: true }));
+      return true; // Keep channel open for async response
 
     case 'CHECK_EXPORT_STATUS':
       handleCheckStatus(sendResponse);
       return true; // Keep channel open for async response
 
     case 'ADD_ORDERS':
-      handleAddOrders(message.orders, message.pageInfo);
-      sendResponse({ success: true });
-      break;
+      handleAddOrders(message.orders, message.pageInfo).then(() => sendResponse({ success: true }));
+      return true; // Keep channel open for async response
+
+    case 'NEXT_YEAR':
+      handleNextYear(sendResponse);
+      return true; // Keep channel open for async response
 
     case 'EXPORT_COMPLETE':
       handleExportComplete(sender.tab?.id);
@@ -37,13 +39,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-async function handleStartExport(tabId) {
+async function handleStartExport(tabId, yearUrls = []) {
   // Clear any previous export data and start fresh
   await chrome.storage.local.set({
     exportActive: true,
     exportTabId: tabId,
     exportOrders: [],
     exportOrderIds: [],
+    exportYearUrls: yearUrls,
     exportStartTime: Date.now(),
     exportPagesProcessed: 0
   });
@@ -83,6 +86,13 @@ async function handleAddOrders(orders, pageInfo) {
   });
 
   console.log(`AOE Background: Added ${newOrders.length} orders from page ${pageInfo?.currentPage || '?'}. Total: ${allOrders.length}`);
+}
+
+async function handleNextYear(sendResponse) {
+  const { exportYearUrls = [] } = await chrome.storage.local.get(['exportYearUrls']);
+  const [url, ...remaining] = exportYearUrls;
+  await chrome.storage.local.set({ exportYearUrls: remaining });
+  sendResponse({ url });
 }
 
 async function handleExportComplete(tabId) {
@@ -125,6 +135,7 @@ async function handleCancelExport() {
     exportTabId: null,
     exportOrders: [],
     exportOrderIds: [],
+    exportYearUrls: [],
     exportPagesProcessed: 0
   });
 }

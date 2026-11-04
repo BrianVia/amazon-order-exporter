@@ -22,9 +22,11 @@ A Chrome extension that exports your Amazon order history to CSV format.
 ## Usage
 
 1. Navigate to [Amazon Orders](https://www.amazon.com/gp/your-account/order-history)
-2. Use Amazon's time filter to select the orders you want to export
+2. Pick what to export in the dropdown next to the export button:
+   - "This view only" exports whatever Amazon's time filter is showing
+   - A year range, such as "2026 back to 2023", exports each of those years into one CSV
 3. Click the "Export Orders to CSV" button that appears on the page
-4. A CSV file will download with all visible orders
+4. Leave the tab open while the extension moves through the pages, then a CSV file will download
 
 ## CSV Output
 
