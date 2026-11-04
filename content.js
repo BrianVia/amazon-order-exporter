@@ -329,13 +329,51 @@
     const btnContainer = document.createElement('div');
     btnContainer.id = 'aoe-btn-container';
     btnContainer.innerHTML = `
+      <select id="aoe-year-select" class="aoe-select" aria-label="Orders to export"></select>
       <button id="aoe-export-btn" class="aoe-btn">${BUTTON_ORIGINAL_HTML}</button>
       <span id="aoe-status"></span>
     `;
 
     headerArea.parentNode.insertBefore(btnContainer, headerArea.nextSibling);
 
+    populateYearSelect();
     document.getElementById('aoe-export-btn').addEventListener('click', startExport);
+  }
+
+  function amazonYearOptions() {
+    const options = [...document.querySelectorAll('select option')]
+      .filter(option => /^year-\d{4}$/.test(option.value));
+    const byValue = new Map(options.map(option => [option.value, option]));
+    return [...byValue.values()].sort((a, b) => b.value.localeCompare(a.value));
+  }
+
+  function populateYearSelect() {
+    const select = document.getElementById('aoe-year-select');
+    const years = amazonYearOptions().map(option => option.value.slice('year-'.length));
+
+    if (years.length === 0) {
+      select.hidden = true;
+      return;
+    }
+
+    select.add(new Option('This view only', ''));
+    years.forEach((year, index) => {
+      select.add(new Option(index === 0 ? year : `${years[0]} back to ${year}`, year));
+    });
+  }
+
+  function selectedYearUrls() {
+    const oldestYear = document.getElementById('aoe-year-select')?.value;
+    if (!oldestYear) return [];
+
+    return amazonYearOptions()
+      .filter(option => option.value >= `year-${oldestYear}`)
+      .map(option => {
+        const url = new URL(location.href);
+        url.searchParams.set(option.closest('select').name || 'timeFilter', option.value);
+        url.searchParams.delete('startIndex');
+        return url.href;
+      });
   }
 
   function setStatus(message, isError = false) {
@@ -404,11 +442,30 @@
   async function startExport() {
     console.log('AOE: Starting export...');
 
-    // Tell background to start export mode
-    await chrome.runtime.sendMessage({ type: 'START_EXPORT' });
+    const yearUrls = selectedYearUrls();
 
-    // Process current page
-    await processCurrentPage();
+    // Tell background to start export mode
+    await chrome.runtime.sendMessage({ type: 'START_EXPORT', yearUrls });
+
+    if (yearUrls.length > 0) {
+      setButtonState(true, 'Starting...');
+      showProgressBanner('Starting export...');
+      await goToNextYearOrFinish();
+    } else {
+      await processCurrentPage();
+    }
+  }
+
+  async function goToNextYearOrFinish() {
+    const { url } = await chrome.runtime.sendMessage({ type: 'NEXT_YEAR' });
+
+    if (url) {
+      console.log('AOE: Navigating to next year...');
+      location.href = url;
+    } else {
+      console.log('AOE: No more pages, completing export');
+      await chrome.runtime.sendMessage({ type: 'EXPORT_COMPLETE' });
+    }
   }
 
   async function processCurrentPage() {
@@ -448,9 +505,8 @@
       // Click next - page will reload and content script will re-run
       pagination.nextButton.click();
     } else {
-      // No more pages - complete export
-      console.log('AOE: No more pages, completing export');
-      await chrome.runtime.sendMessage({ type: 'EXPORT_COMPLETE' });
+      await new Promise(r => setTimeout(r, 1000));
+      await goToNextYearOrFinish();
     }
   }
 
